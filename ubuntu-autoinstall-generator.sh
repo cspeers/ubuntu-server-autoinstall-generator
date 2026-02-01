@@ -219,21 +219,32 @@ if [ ${use_hwe_kernel} -eq 1 ]; then
                 log "☑️ Destination ISO will use HWE kernel."
                 sed -i -e 's|/casper/vmlinuz|/casper/hwe-vmlinuz|g' "$tmpdir/iso/boot/grub/grub.cfg"
                 sed -i -e 's|/casper/initrd|/casper/hwe-initrd|g' "$tmpdir/iso/boot/grub/grub.cfg"
-                sed -i -e 's|/casper/vmlinuz|/casper/hwe-vmlinuz|g' "$tmpdir/iso/boot/grub/loopback.cfg"
-                sed -i -e 's|/casper/initrd|/casper/hwe-initrd|g' "$tmpdir/iso/boot/grub/loopback.cfg"
+                if $has_loopback; then
+                    sed -i -e 's|/casper/vmlinuz|/casper/hwe-vmlinuz|g' "$tmpdir/iso/boot/grub/loopback.cfg"
+                    sed -i -e 's|/casper/initrd|/casper/hwe-initrd|g' "$tmpdir/iso/boot/grub/loopback.cfg"
+                fi
         else
                 log "⚠️ This source ISO does not support the HWE kernel. Proceeding with the regular kernel."
         fi
 fi
 
+#ARM64 support uses a different bootloader, not covered by this
+if [ -f "$tmpdir/iso/boot/grub/loopback.cfg" ]; then
+    has_loopback=true
+fi
+
 log "🧩 Adding autoinstall parameter to kernel command line..."
 sed -i -e 's/---/ nomodeset autoinstall  ---/g' "$tmpdir/iso/boot/grub/grub.cfg"
-sed -i -e 's/---/ nomodeset autoinstall  ---/g' "$tmpdir/iso/boot/grub/loopback.cfg"
+if $has_loopback; then
+        sed -i -e 's/---/ nomodeset autoinstall  ---/g' "$tmpdir/iso/boot/grub/loopback.cfg"
+fi
 log "👍 Added parameter to UEFI kernel command line."
 
 log "🧩 Setting grub timeout to 1 second..."
 sed -i -e 's/timeout=30/timeout=1/g' "$tmpdir/iso/boot/grub/grub.cfg"
-sed -i -e 's/timeout=30/timeout=1/g' "$tmpdir/iso/boot/grub/loopback.cfg"
+if $has_loopback; then
+        sed -i -e 's/timeout=30/timeout=1/g' "$tmpdir/iso/boot/grub/loopback.cfg"
+fi
 log "👍 Timeout set for UEFI kernel command line."
 
 if [ ${all_in_one} -eq 1 ]; then
@@ -246,7 +257,9 @@ if [ ${all_in_one} -eq 1 ]; then
                 touch "$tmpdir/iso/server/meta-data"
         fi
         sed -i -e 's,---, ds=nocloud\\\;s=/cdrom/server/  ---,g' "$tmpdir/iso/boot/grub/grub.cfg"
-        sed -i -e 's,---, ds=nocloud\\\;s=/cdrom/server/  ---,g' "$tmpdir/iso/boot/grub/loopback.cfg"
+        if $has_loopback; then
+            sed -i -e 's,---, ds=nocloud\\\;s=/cdrom/server/  ---,g' "$tmpdir/iso/boot/grub/loopback.cfg"
+        fi
         log "👍 Added data and configured kernel command line."
 fi
 
@@ -254,8 +267,10 @@ if [ ${md5_checksum} -eq 1 ]; then
         log "👷 Updating $tmpdir/iso/md5sum.txt with hashes of modified files..."
         md5=$(md5sum "$tmpdir/iso/boot/grub/grub.cfg" | cut -f1 -d ' ')
         sed -i -e 's,^.*[[:space:]] ./boot/grub/grub.cfg,'"$md5"'  ./boot/grub/grub.cfg,' "$tmpdir/iso/md5sum.txt"
-        md5=$(md5sum "$tmpdir/iso/boot/grub/loopback.cfg" | cut -f1 -d ' ')
-        sed -i -e 's,^.*[[:space:]] ./boot/grub/loopback.cfg,'"$md5"'  ./boot/grub/loopback.cfg,' "$tmpdir/iso/md5sum.txt"
+        if $has_loopback; then
+                md5=$(md5sum "$tmpdir/iso/boot/grub/loopback.cfg" | cut -f1 -d ' ')
+                sed -i -e 's,^.*[[:space:]] ./boot/grub/loopback.cfg,'"$md5"'  ./boot/grub/loopback.cfg,' "$tmpdir/iso/md5sum.txt"
+        fi
         log "👍 Updated hashes."
 else
         log "🗑️ Clearing MD5 hashes..."
