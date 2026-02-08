@@ -56,6 +56,12 @@ Available options:
                         That file will be used by default if it already exists.
 -d, --destination       Destination ISO file. By default ${script_dir}/ubuntu-autoinstall-$today.iso will be
                         created, overwriting any existing file.
+
+-n, --no-mbr            Generate an ISO that only supports UEFI booting. By default the generated ISO will support both
+                        BIOS and UEFI booting, but if this option is specified, the BIOS bootloader will be removed and
+                        the ISO will only support UEFI booting. This can be useful for use cases where you want to force
+                        UEFI booting, or if you want to reduce the size of the generated ISO by removing the BIOS
+                        bootloader.
 EOF
         exit
 }
@@ -75,6 +81,7 @@ function parse_params() {
         use_hwe_kernel=0
         md5_checksum=1
         use_release_iso=0
+        uefi_only=0
 
         while :; do
                 case "${1-}" in
@@ -101,6 +108,8 @@ function parse_params() {
                         meta_data_file="${2-}"
                         shift
                         ;;
+                -n | --no-mbr)
+                        uefi_only=1 ;;
                 -?*) die "Unknown option: $1" ;;
                 *) break ;;
                 esac
@@ -137,11 +146,12 @@ function parse_params() {
         return 0
 }
 
+
 ubuntu_gpg_key_id="843938DF228D22F7B3742BC0D94AA3F0EFE21092"
+has_loopback=0
+tmpdir=$(mktemp -d)
 
 parse_params "$@"
-
-tmpdir=$(mktemp -d)
 
 if [[ ! "$tmpdir" || ! -d "$tmpdir" ]]; then
         die "💥 Could not create temporary working directory."
@@ -216,21 +226,17 @@ chmod -R u+w "$tmpdir/iso"
 mv "$tmpdir/iso/"'[BOOT]' "$tmpdir/BOOT"
 log "👍 Extracted to $tmpdir/iso"
 
-has_loopback=false
-#ARM64 support uses a different bootloader, not covered by this (we'll rename the condition)
+#UEFI-only ISOs don't have a loopback.cfg file, so we can check for the presence of that file to determine if the ISO supports BIOS booting or not.
+# If the file is not present, we can set a flag to indicate that the ISO only supports UEFI booting, and we can skip any steps related to configuring the BIOS bootloader.
 if [ -f "$tmpdir/iso/boot/grub/loopback.cfg" ]; then
-        has_loopback=true
-else
-        has_loopback=false
-fi
-
-if [[ "$has_loopback" == "true" ]]; then
+        has_loopback=1
         log "☑️ Detected loopback.cfg support."
 else
-        log "ℹ️ No loopback.cfg detected."
+        uefi_only=1
+        log "ℹ️ No loopback.cfg detected. Assuming this ISO only supports UEFI booting."
 fi
-
 log "🧩 Configuring bootloader for autoinstall..."
+echo "uefi_only: ${uefi_only}, has_loopback: ${has_loopback}, use_hwe_kernel: ${use_hwe_kernel}"
 
 if [ ${use_hwe_kernel} -eq 1 ]; then
         if grep -q "hwe-vmlinuz" "$tmpdir/iso/boot/grub/grub.cfg"; then
@@ -245,17 +251,33 @@ if [ ${use_hwe_kernel} -eq 1 ]; then
                 log "⚠️ This source ISO does not support the HWE kernel. Proceeding with the regular kernel."
         fi
 fi
+if [ ${uefi_only} -eq 1 ]; then
+        log "🧩 Finding correct UEFI ESP file"
+        if [ -f "$tmpdir/BOOT/Boot-NoEmul.img" ]; then
+                esp_file="$tmpdir/BOOT/Boot-NoEmul.img"
+        fi
+        if [ -f "$tmpdir/BOOT/2-Boot-NoEmul.img" ]; then
+                esp_file="$tmpdir/BOOT/2-Boot-NoEmul.img"
+        fi
+        if [ -z "${esp_file+x}" ]; then
+                die "💥 Could not find UEFI ESP file on the source ISO. Cannot continue with UEFI-only ISO generation."
+        fi
+
+        log "☑️ Found UEFI ESP file at $esp_file"
+fi
 
 log "🧩 Adding autoinstall parameter to kernel command line..."
 sed -i -e 's/---/ nomodeset autoinstall  ---/g' "$tmpdir/iso/boot/grub/grub.cfg"
-if [[ "$has_loopback" == "true" ]]; then
-        sed -i -e 's/---/ nomodeset autoinstall  ---/g' "$tmpdir/iso/boot/grub/loopback.cfg"
+if [ ${uefi_only} -eq 1 ]; then
+        if [ ${has_loopback} -eq 1 ]; then
+                log "☑️ Adding autoinstall parameter to UEFI kernel command line."
+                sed -i -e 's/---/ nomodeset autoinstall  ---/g' "$tmpdir/iso/boot/grub/loopback.cfg"
+        fi
 fi
-log "👍 Added parameter to UEFI kernel command line."
 
 log "🧩 Setting grub timeout to 1 second..."
 sed -i -e 's/timeout=30/timeout=1/g' "$tmpdir/iso/boot/grub/grub.cfg"
-if [[ "$has_loopback" == "true" ]]; then
+if [ ${uefi_only} -eq 1 ]; then
         sed -i -e 's/timeout=30/timeout=1/g' "$tmpdir/iso/boot/grub/loopback.cfg"
 fi
 log "👍 Timeout set for UEFI kernel command line."
@@ -293,12 +315,11 @@ fi
 
 log "📦 Repackaging extracted files into an ISO image..."
 cd "$tmpdir/iso"
-if [[ "$has_loopback" == "true" ]]; then
-        xorriso -as mkisofs -r -V "ubuntu-autoinstall-$today" -o "${destination_iso}" --grub2-mbr ../BOOT/1-Boot-NoEmul.img -partition_offset 16 --mbr-force-bootable -append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b ../BOOT/2-Boot-NoEmul.img -appended_part_as_gpt -iso_mbr_part_type a2a0d0ebe5b9334487c068b6b72699c7 -c '/boot.catalog' -b '/boot/grub/i386-pc/eltorito.img' -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info -eltorito-alt-boot -e '--interval:appended_partition_2:::' -no-emul-boot .
+if [ ${uefi_only} -eq 1 ]; then
+        mv $esp_file ./
+        xorriso -as mkisofs -r -V "ubuntu-autoinstall-$today" -o "$destination_iso" -iso-level 3 -eltorito-alt-boot -e $(basename $esp_file -d) -no-emul-boot .
 else
-        mv ../BOOT/Boot-NoEmul.img ./
-        xorriso -as mkisofs -r -V "ubuntu-autoinstall-arm64" -o "$destination_iso" -iso-level 3 -eltorito-alt-boot -e Boot-NoEmul.img -no-emul-boot .
-
+        xorriso -as mkisofs -r -V "ubuntu-autoinstall-$today" -o "${destination_iso}" --grub2-mbr ../BOOT/1-Boot-NoEmul.img -partition_offset 16 --mbr-force-bootable -append_partition 2 28732ac11ff8d211ba4b00a0c93ec93b ../BOOT/2-Boot-NoEmul.img -appended_part_as_gpt -iso_mbr_part_type a2a0d0ebe5b9334487c068b6b72699c7 -c '/boot.catalog' -b '/boot/grub/i386-pc/eltorito.img' -no-emul-boot -boot-load-size 4 -boot-info-table --grub2-boot-info -eltorito-alt-boot -e '--interval:appended_partition_2:::' -no-emul-boot .
 fi
 cd "$OLDPWD"
 log "👍 Repackaged into ${destination_iso}"
